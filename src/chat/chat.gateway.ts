@@ -7,6 +7,7 @@ import {
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
 
 interface Message {
   user: string;
@@ -14,6 +15,7 @@ interface Message {
   timestamp: number;
 }
 
+@ApiTags('chat')
 @WebSocketGateway({
   cors: {
     origin: 'http://localhost:3000',
@@ -42,6 +44,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('join')
+  @ApiOperation({ summary: 'User joins the chat room' })
   handleJoin(client: Socket, username: string) {
     this.users.set(client.id, username);
     this.server.emit('userJoined', { username });
@@ -49,11 +52,13 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('message')
+  @ApiOperation({ summary: 'Send a chat message' })
   handleMessage(client: Socket, payload: Message) {
     this.server.emit('message', payload);
   }
 
   @SubscribeMessage('typing')
+  @ApiOperation({ summary: 'User is typing indicator' })
   handleTyping(client: Socket, username: string) {
     client.broadcast.emit('typing', username);
   }
