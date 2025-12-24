@@ -1,65 +1,138 @@
-// src/chat.gateway.ts
 import {
   WebSocketGateway,
-  WebSocketServer,
   SubscribeMessage,
-  OnGatewayConnection,
-  OnGatewayDisconnect,
+  type OnGatewayConnection,
+  type OnGatewayDisconnect,
+  WebSocketServer,
 } from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import type { Server, Socket } from 'socket.io';
+import { ChatService } from './chat.service';
+import { RoomService } from 'src/room/room/room.service';
 
-interface Message {
-  user: string;
-  text: string;
-  timestamp: number;
-}
-
-@ApiTags('chat')
 @WebSocketGateway({
   cors: {
-    origin: 'http://localhost:3000',
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     credentials: true,
   },
+  transports: ['websocket', 'polling'],
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
   server: Server;
 
-  private users: Map<string, string> = new Map();
+  constructor(
+    private chatService: ChatService,
+    private roomService: RoomService,
+  ) {}
 
   handleConnection(client: Socket) {
-    console.log(`Client connected: ${client.id}`);
+    console.log(`[WebSocket] Client connected: ${client.id}`);
   }
 
   handleDisconnect(client: Socket) {
-    const username = this.users.get(client.id);
-    this.users.delete(client.id);
+    console.log(`[WebSocket] Client disconnected: ${client.id}`);
+    this.chatService.handleDisconnect(client.id, this.server);
+  }
 
-    if (username) {
-      this.server.emit('userLeft', { username });
-      this.server.emit('userCount', this.users.size);
+  @SubscribeMessage('join_room')
+  async handleJoinRoom(
+    client: Socket,
+    data: {
+      roomId: string;
+      username: string;
+      password: string;
+      isCreator: boolean;
+    },
+  ) {
+    try {
+      const result = await this.roomService.joinRoom(data, client.id);
+
+      if (!result.success) {
+        client.emit('auth_error', result.message);
+        return;
+      }
+
+      // Join socket to room
+      client.join(data.roomId);
+
+      // Send room data
+      client.emit('room_joined', result.roomData);
+      client.emit('message_history', result.messages);
+
+      // Notify others
+      this.server.to(data.roomId).emit('user_joined', {
+        username: data.username,
+        memberCount: result.memberCount,
+      });
+
+      console.log(
+        `[WebSocket] User ${data.username} joined room ${data.roomId}`,
+      );
+    } catch (error) {
+      console.error('[WebSocket] Join room error:', error);
+      client.emit('auth_error', 'Server error');
     }
-    console.log(`Client disconnected: ${client.id}`);
   }
 
-  @SubscribeMessage('join')
-  @ApiOperation({ summary: 'User joins the chat room' })
-  handleJoin(client: Socket, username: string) {
-    this.users.set(client.id, username);
-    this.server.emit('userJoined', { username });
-    this.server.emit('userCount', this.users.size);
+  @SubscribeMessage('send_message')
+  handleSendMessage(
+    client: Socket,
+    message: {
+      id: string;
+      username: string;
+      text: string;
+      timestamp: number;
+    },
+  ) {
+    try {
+      const result = this.chatService.saveMessage(client.id, message);
+
+      if (!result.success) {
+        return;
+      }
+
+      // Broadcast to room
+      this.server.to(result.roomId).emit('receive_message', result.message);
+      console.log(
+        `[WebSocket] Message in room ${result.roomId} from ${message.username}`,
+      );
+    } catch (error) {
+      console.error('[WebSocket] Send message error:', error);
+    }
   }
 
-  @SubscribeMessage('message')
-  @ApiOperation({ summary: 'Send a chat message' })
-  handleMessage(client: Socket, payload: Message) {
-    this.server.emit('message', payload);
+  @SubscribeMessage('get_room_info')
+  handleGetRoomInfo(client: Socket, roomId: string) {
+    try {
+      const roomInfo = this.roomService.getRoomInfo(roomId);
+
+      if (!roomInfo) {
+        client.emit('room_error', 'Room not found');
+        return;
+      }
+
+      client.emit('room_info', roomInfo);
+    } catch (error) {
+      console.error('[WebSocket] Get room info error:', error);
+      client.emit('room_error', 'Server error');
+    }
   }
 
-  @SubscribeMessage('typing')
-  @ApiOperation({ summary: 'User is typing indicator' })
-  handleTyping(client: Socket, username: string) {
-    client.broadcast.emit('typing', username);
+  @SubscribeMessage('leave_room')
+  handleLeaveRoom(client: Socket, roomId: string) {
+    try {
+      const result = this.chatService.handleDisconnect(
+        client.id,
+        this.server,
+        roomId,
+      );
+
+      if (result) {
+        client.leave(roomId);
+        client.emit('room_left', { roomId });
+      }
+    } catch (error) {
+      console.error('[WebSocket] Leave room error:', error);
+    }
   }
 }
